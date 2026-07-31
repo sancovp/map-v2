@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "map-v2"
+version = "0.1.0"
+description = "A domain-neutral Prolog-backed cognition lattice and proof shell."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+map-v2 = "map_v2.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["map_v2*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"map_v2" = ["prolog/*.pl"]

@@ -1,0 +1,7 @@
+{
+  "schema": "map.domain.v1",
+  "id": "toy_claims",
+  "entrypoint": "domain.pl",
+  "targets": ["claim"],
+  "sources": []
+}
