@@ -1,0 +1,7 @@
+{
+  "schema": "map.domain.v1",
+  "id": "typed_chain_fixture",
+  "entrypoint": "domain.pl",
+  "targets": ["typed_chain"],
+  "sources": []
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib import import_module
 import json
 from pathlib import Path
 import sys
@@ -21,6 +22,10 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Path to a map.domain.v1 manifest",
+    )
+    parser.add_argument(
+        "--construction-adapter",
+        help="Explicit PSC adapter as MODULE:ATTRIBUTE for typed construction commands",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     _add_mutation_commands(sub)
@@ -50,12 +55,26 @@ def _add_mutation_commands(sub: argparse._SubParsersAction) -> None:
     fill.add_argument("name")
     fill.add_argument("facts", nargs="+")
 
+    fill_construction = sub.add_parser(
+        "fill-construction",
+        help="Validate a PSC payload and lower it into candidate-only facts",
+    )
+    fill_construction.add_argument("name")
+    fill_construction.add_argument("payload", help="JSON object or @path/to/payload.json")
+
     retry = sub.add_parser("retry", help="Move a SOUP node back to DERIVE for repair")
     retry.add_argument("name")
 
     revise = sub.add_parser("revise", help="Replace a repairing node's facts after COMPUTE")
     revise.add_argument("name")
     revise.add_argument("facts", nargs="+")
+
+    revise_construction = sub.add_parser(
+        "revise-construction",
+        help="Replace a repairing node with a validated PSC payload",
+    )
+    revise_construction.add_argument("name")
+    revise_construction.add_argument("payload", help="JSON object or @path/to/payload.json")
 
     select = sub.add_parser("select", help="Select the node compile uses by default")
     select.add_argument("name")
@@ -101,10 +120,14 @@ def _dispatch(args: argparse.Namespace, lattice: MapV2Lattice):
         return lattice.compute(args.name)
     if args.command == "fill":
         return lattice.fill(args.name, args.facts)
+    if args.command == "fill-construction":
+        return lattice.fill_construction(args.name, _parse_payload(args.payload))
     if args.command == "retry":
         return lattice.retry(args.name)
     if args.command == "revise":
         return lattice.revise(args.name, args.facts)
+    if args.command == "revise-construction":
+        return lattice.revise_construction(args.name, _parse_payload(args.payload))
     if args.command == "select":
         return lattice.select(args.name)
     if args.command == "compile":
@@ -156,6 +179,26 @@ def _parse_invariants(values: list[str]) -> dict[str, str]:
     return invariants
 
 
+def _parse_payload(value: str) -> dict:
+    if value.startswith("@"):
+        payload = json.loads(Path(value[1:]).read_text(encoding="utf-8"))
+    else:
+        payload = json.loads(value)
+    if not isinstance(payload, dict):
+        raise MapV2Error("typed construction payload must be a JSON object")
+    return payload
+
+
+def _load_construction_adapter(reference: str | None):
+    if not reference:
+        return None
+    if ":" not in reference:
+        raise MapV2Error("construction adapter must use MODULE:ATTRIBUTE syntax")
+    module_name, attribute = reference.split(":", 1)
+    value = getattr(import_module(module_name), attribute)
+    return value() if isinstance(value, type) else value
+
+
 def _write_artifact(path: Path, payload: dict) -> dict:
     if path.exists():
         raise MapV2Error(f"refusing to overwrite artifact: {path}")
@@ -174,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
         lattice = MapV2Lattice(
             args.state,
             compiler=PrologTargetCompiler(domain),
+            construction_adapter=_load_construction_adapter(
+                args.construction_adapter
+            ),
         )
         result = _dispatch(args, lattice)
     except (MapDomainError, MapRuntimeError, MapV2Error, ValueError) as exc:  # codenose ignore: expected CLI error packet

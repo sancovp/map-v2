@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A domain-neutral Prolog-backed cognition lattice and proof shell."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pydantic-stack-core>=0.1.4"]
 
 [project.scripts]
 map-v2 = "map_v2.cli:main"

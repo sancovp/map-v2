@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
+
+from .construction import (
+    ConstructionAdapter,
+    adapter_context,
+    validate_and_lower,
+)
 
 from .griess import (
     advance_griess,
@@ -37,7 +43,7 @@ class TargetCompiler(Protocol):
 
 GuideBuilder = Callable[[Path, dict[str, Any], list[dict[str, str]]], dict[str, Any]]
 CertificateBuilder = Callable[
-    [dict[str, Any], dict[str, Any], dict[str, list[str]]], dict[str, Any]
+    [dict[str, Any], dict[str, Any], dict[str, Any]], dict[str, Any]
 ]
 
 
@@ -54,6 +60,13 @@ PACKET_FIELDS = (
     "domain_sha256",
     "workspace_sha256",
     "kappa_sha256",
+    "construction_schema_id",
+    "construction_schema_sha256",
+    "construction_payload_sha256",
+    "construction_render_sha256",
+    "construction_lowering_id",
+    "construction_lowering_sha256",
+    "construction_facts_sha256",
 )
 
 
@@ -88,6 +101,7 @@ class MapV2Lattice(MapV2StateMixin):
         state_dir: str | Path = DEFAULT_STATE_DIR,
         *,
         compiler: TargetCompiler | None = None,
+        construction_adapter: ConstructionAdapter | None = None,
         guide_builder: GuideBuilder | None = None,
         certificate_builder: CertificateBuilder | None = None,
     ) -> None:
@@ -95,6 +109,7 @@ class MapV2Lattice(MapV2StateMixin):
         self.state_path = self.state_dir / "state.json"
         self.workspace_path = self.state_dir / "workspace.pl"
         self.compiler = compiler
+        self.construction_adapter = construction_adapter
         self.guide_builder = guide_builder
         self.certificate_builder = certificate_builder
 
@@ -207,6 +222,7 @@ class MapV2Lattice(MapV2StateMixin):
             )
         facts = _normalize_facts(raw_facts)
         node["facts"] = facts
+        node["construction"] = None
         node["status"] = "filled"
         node["certificate"] = None
         node["proof_context"] = None
@@ -216,6 +232,49 @@ class MapV2Lattice(MapV2StateMixin):
         return {
             "filled": name,
             "fact_count": len(facts),
+            "griess_phase": "build",
+            "next": self.next_name(state),
+        }
+
+    def fill_construction(
+        self,
+        name: str,
+        payload: Mapping[str, Any],
+        adapter: ConstructionAdapter | None = None,
+    ) -> dict[str, Any]:
+        """Validate a PSC value and fill a node with candidate-only facts."""
+        state = self._load()
+        node = self._node(state, name)
+        if node["status"] != "open":
+            raise MapV2Error(
+                f"only open nodes can be filled; {name!r} is {node['status']}"
+            )
+        if node["griess"]["phase"] != "compute":
+            raise MapV2Error(
+                f"fill_construction requires Griess compute; {name!r} is "
+                f"{node['griess']['phase']}"
+            )
+        selected_adapter = self._resolve_construction_adapter(adapter)
+        if selected_adapter.target != state["target"]:
+            raise MapV2Error(
+                "construction adapter target mismatch: "
+                f"expected {state['target']}, got {selected_adapter.target}"
+            )
+        lowered = validate_and_lower(selected_adapter, payload)
+        node["facts"] = lowered.facts
+        node["construction"] = lowered.metadata
+        node["status"] = "filled"
+        node["certificate"] = None
+        node["proof_context"] = None
+        advance_griess(
+            node["griess"], "build", "typed PSC construction lowered to candidate facts"
+        )
+        state["selected"] = name
+        self._save(state)
+        return {
+            "filled": name,
+            "fact_count": len(lowered.facts),
+            "construction": self._construction_summary(lowered.metadata),
             "griess_phase": "build",
             "next": self.next_name(state),
         }
@@ -232,9 +291,12 @@ class MapV2Lattice(MapV2StateMixin):
             domain_sha256 is not None
             and certificate.get("domain_sha256") != domain_sha256
         )
+        construction_stale = self._construction_rejection(node) is not None
         if phase == "soup":
             advance_griess(node["griess"], "derive", "retry from MAP residue")
-        elif phase == "ont" and (workspace_stale or kappa_stale or domain_stale):
+        elif phase == "ont" and (
+            workspace_stale or kappa_stale or domain_stale or construction_stale
+        ):
             invalidate_to_derive(node["griess"], "proof context changed")
         else:
             raise MapV2Error(
@@ -261,9 +323,11 @@ class MapV2Lattice(MapV2StateMixin):
             {
                 "revised_at": utc_now(),
                 "facts": list(node.get("facts", [])),
+                "construction": node.get("construction"),
             }
         )
         node["facts"] = facts
+        node["construction"] = None
         node["status"] = "filled"
         node["certificate"] = None
         node["proof_context"] = None
@@ -274,6 +338,57 @@ class MapV2Lattice(MapV2StateMixin):
             "revised": name,
             "fact_count": len(facts),
             "revision_count": len(node["revisions"]),
+            "griess_phase": "build",
+            "next": "compile",
+        }
+
+    def revise_construction(
+        self,
+        name: str,
+        payload: Mapping[str, Any],
+        adapter: ConstructionAdapter | None = None,
+    ) -> dict[str, Any]:
+        """Replace a repairing node with a newly validated PSC construction."""
+        state = self._load()
+        node = self._node(state, name)
+        if node["status"] != "repairing":
+            raise MapV2Error(
+                f"only repairing nodes can be revised; {name!r} is {node['status']}"
+            )
+        if node["griess"]["phase"] != "compute":
+            raise MapV2Error(
+                f"revise_construction requires Griess compute; {name!r} is "
+                f"{node['griess']['phase']}"
+            )
+        selected_adapter = self._resolve_construction_adapter(adapter)
+        if selected_adapter.target != state["target"]:
+            raise MapV2Error(
+                "construction adapter target mismatch: "
+                f"expected {state['target']}, got {selected_adapter.target}"
+            )
+        lowered = validate_and_lower(selected_adapter, payload)
+        node.setdefault("revisions", []).append(
+            {
+                "revised_at": utc_now(),
+                "facts": list(node.get("facts", [])),
+                "construction": node.get("construction"),
+            }
+        )
+        node["facts"] = lowered.facts
+        node["construction"] = lowered.metadata
+        node["status"] = "filled"
+        node["certificate"] = None
+        node["proof_context"] = None
+        advance_griess(
+            node["griess"], "build", "typed PSC construction revised"
+        )
+        state["selected"] = name
+        self._save(state)
+        return {
+            "revised": name,
+            "fact_count": len(lowered.facts),
+            "revision_count": len(node["revisions"]),
+            "construction": self._construction_summary(lowered.metadata),
             "griess_phase": "build",
             "next": "compile",
         }
@@ -304,6 +419,11 @@ class MapV2Lattice(MapV2StateMixin):
             raise MapV2Error(
                 f"compile requires Griess build or verify; {name!r} is {phase}"
             )
+        construction_rejection = self._construction_rejection(node)
+        if construction_rejection:
+            raise MapV2Error(
+                f"compile rejected typed construction: {construction_rejection}"
+            )
         if phase == "build":
             advance_griess(node["griess"], "verify", "MAP verification started")
             self._save(state)
@@ -327,6 +447,8 @@ class MapV2Lattice(MapV2StateMixin):
             "domain_terms": list(packet.get("domain_terms", [])),
             "proof_terms": list(packet.get("outputs", [])),
         }
+        if node.get("construction") is not None:
+            proof_context["construction"] = node["construction"]
         proof_context.update(packet.get("proof_context", {}))
         node["proof_context"] = proof_context
         node["certificate"] = self._certificate(
@@ -444,3 +566,47 @@ class MapV2Lattice(MapV2StateMixin):
                 "MAP compute/compile requires a selected domain compiler"
             )
         return selected
+
+    def _resolve_construction_adapter(
+        self, adapter: ConstructionAdapter | None
+    ) -> ConstructionAdapter:
+        selected = adapter or self.construction_adapter
+        if selected is None:
+            raise MapV2Error(
+                "typed construction fill requires a selected construction adapter"
+            )
+        return selected
+
+    @staticmethod
+    def _construction_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: metadata[key]
+            for key in (
+                "schema_id",
+                "schema_sha256",
+                "payload_sha256",
+                "render_sha256",
+                "lowering_id",
+                "lowering_sha256",
+                "facts_sha256",
+            )
+        }
+
+    def _construction_rejection(self, node: dict[str, Any]) -> str | None:
+        construction = node.get("construction")
+        if construction is None:
+            return None
+        if self.construction_adapter is None:
+            return "missing_current_construction_adapter"
+        current = adapter_context(self.construction_adapter)
+        if current["target"] != construction.get("target"):
+            return "stale_construction_target"
+        if current["schema_id"] != construction.get("schema_id"):
+            return "stale_construction_schema_id"
+        if current["schema_sha256"] != construction.get("schema_sha256"):
+            return "stale_construction_schema"
+        if current["lowering_id"] != construction.get("lowering_id"):
+            return "stale_construction_lowering_id"
+        if current["lowering_sha256"] != construction.get("lowering_sha256"):
+            return "stale_construction_lowering"
+        return None
