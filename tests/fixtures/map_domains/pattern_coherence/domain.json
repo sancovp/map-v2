@@ -1,0 +1,7 @@
+{
+  "schema": "map.domain.v1",
+  "id": "pattern_coherence_fixture",
+  "entrypoint": "domain.pl",
+  "sources": ["domain.pl"],
+  "targets": ["pattern_occurrence"]
+}

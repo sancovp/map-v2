@@ -27,6 +27,10 @@ def _parser() -> argparse.ArgumentParser:
         "--construction-adapter",
         help="Explicit PSC adapter as MODULE:ATTRIBUTE for typed construction commands",
     )
+    parser.add_argument(
+        "--observation-adapter",
+        help="Trusted source adapter as MODULE:ATTRIBUTE for observation commands",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     _add_mutation_commands(sub)
     _add_query_commands(sub)
@@ -61,6 +65,13 @@ def _add_mutation_commands(sub: argparse._SubParsersAction) -> None:
     )
     fill_construction.add_argument("name")
     fill_construction.add_argument("payload", help="JSON object or @path/to/payload.json")
+
+    attach_observation = sub.add_parser(
+        "attach-observation",
+        help="Validate a trusted observation payload and attach source-only facts",
+    )
+    attach_observation.add_argument("name")
+    attach_observation.add_argument("payload", help="JSON object or @path/to/payload.json")
 
     retry = sub.add_parser("retry", help="Move a SOUP node back to DERIVE for repair")
     retry.add_argument("name")
@@ -122,6 +133,8 @@ def _dispatch(args: argparse.Namespace, lattice: MapV2Lattice):
         return lattice.fill(args.name, args.facts)
     if args.command == "fill-construction":
         return lattice.fill_construction(args.name, _parse_payload(args.payload))
+    if args.command == "attach-observation":
+        return lattice.attach_observation(args.name, _parse_payload(args.payload))
     if args.command == "retry":
         return lattice.retry(args.name)
     if args.command == "revise":
@@ -199,6 +212,16 @@ def _load_construction_adapter(reference: str | None):
     return value() if isinstance(value, type) else value
 
 
+def _load_observation_adapter(reference: str | None):
+    if not reference:
+        return None
+    if ":" not in reference:
+        raise MapV2Error("observation adapter must use MODULE:ATTRIBUTE syntax")
+    module_name, attribute = reference.split(":", 1)
+    value = getattr(import_module(module_name), attribute)
+    return value() if isinstance(value, type) else value
+
+
 def _write_artifact(path: Path, payload: dict) -> dict:
     if path.exists():
         raise MapV2Error(f"refusing to overwrite artifact: {path}")
@@ -219,6 +242,9 @@ def main(argv: list[str] | None = None) -> int:
             compiler=PrologTargetCompiler(domain),
             construction_adapter=_load_construction_adapter(
                 args.construction_adapter
+            ),
+            observation_adapter=_load_observation_adapter(
+                args.observation_adapter
             ),
         )
         result = _dispatch(args, lattice)

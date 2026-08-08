@@ -7,8 +7,9 @@ not execute or import GAS.
 ## Dependency Boundary
 
 ```text
-application -> optional typed-construction adapter -> domain -> map_v2
-            -> SWI-Prolog
+candidate author -> optional ConstructionAdapter --\
+                                                 +-> domain -> map_v2 -> SWI-Prolog
+trusted observer -> optional ObservationAdapter --/
 ```
 
 MAP owns:
@@ -34,22 +35,35 @@ The optional construction adapter is application-owned. It gives MAP:
 
 - a concrete `pydantic_stack_core.RenderablePiece` model;
 - stable schema and lowering identifiers;
-- an allow-list containing only `candidate_*` and `source_*` predicates;
+- an allow-list containing only `candidate_*` predicates;
 - a deterministic lowering from the validated value to ground candidate facts.
+
+An independently selected observation adapter gives MAP:
+
+- a concrete snapshot/evidence `RenderablePiece` model;
+- pinned schema and lowering identities;
+- an allow-list containing only `source_*` predicates;
+- deterministic lowering from observed evidence to ground source facts.
+
+The construction adapter cannot emit source evidence, and the observation
+adapter cannot emit candidates. Neither can emit derived predicates. This
+prevents an LLM-authored proposal from manufacturing the evidence that proves
+itself while keeping both inputs typed and replayable.
 
 The separation is intentional:
 
 | Layer | Establishes | Does not establish |
 | --- | --- | --- |
 | PSC | One value has the declared nested shape and local invariants | Recursive consequences, graph closure, or domain truth |
-| Adapter | The value has one canonical candidate-fact interpretation | Derived predicates or proof success |
+| Construction adapter | The proposal has one canonical candidate-fact interpretation | Source evidence, derived predicates, or proof success |
+| Observation adapter | The snapshot has one canonical source-fact interpretation | Candidate intent, derived predicates, or proof success |
 | MAP + Prolog domain | Relational consequences close the declared obligations | That malformed source data should have been accepted |
 
 The lowerer cannot author derived predicates, rules, or directives. Only the
 domain theory can derive proof terms. MAP persists hashes and identities for
-the concrete model schema, canonical payload, rendered value, lowering source,
+each concrete model schema, canonical payload, rendered value, lowering source,
 and lowered fact set. Those fields enter the proof packet and certificate, so
-adapter drift makes prior ONT state stale.
+drift in either authority makes prior ONT state stale.
 
 This is a weak-to-strong neurosymbolic path rather than a claim that natural
 language proves itself. An LLM first proposes an explicit construction with
@@ -113,6 +127,15 @@ Typed applications additionally select their adapter explicitly:
 map-v2 --domain-manifest PATH --state STATE \
   --construction-adapter package.module:Adapter \
   fill-construction NODE @payload.json
+```
+
+Observed applications attach independently validated evidence before compile:
+
+```bash
+map-v2 --domain-manifest PATH --state STATE \
+  --construction-adapter package.module:ConstructionAdapter \
+  --observation-adapter package.module:ObservationAdapter \
+  attach-observation NODE @snapshot.json
 ```
 
 The domain manifest is explicit so loading a theory is never an ambient or

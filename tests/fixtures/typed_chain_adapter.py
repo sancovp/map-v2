@@ -61,9 +61,7 @@ class TypedChainAdapter:
     schema_id = "map.fixture.typed_chain.v1"
     lowering_id = "map.fixture.typed_chain.lowering.v1"
     model_type = ChainConstruction
-    candidate_predicates = frozenset(
-        {"candidate_goal", "candidate_step", "source_witness"}
-    )
+    candidate_predicates = frozenset({"candidate_goal", "candidate_step"})
 
     def lower(self, construction: RenderablePiece) -> list[str]:
         if not isinstance(construction, ChainConstruction):
@@ -74,17 +72,50 @@ class TypedChainAdapter:
             ")."
         ]
         for step in construction.steps:
-            facts.extend(
-                (
-                    "candidate_step("
-                    f"{construction.subject},{step.id},{step.source},{step.target}"
-                    ").",
-                    "source_witness("
-                    f"{construction.subject},{step.id},{step.how.source}"
-                    ").",
-                )
+            facts.append(
+                "candidate_step("
+                f"{construction.subject},{step.id},{step.source},{step.target}"
+                ")."
             )
         return facts
+
+
+class WitnessRecord(RenderablePiece):
+    kind: Literal["witness"]
+    step_id: Atom
+    source: Atom
+
+    def render(self) -> str:
+        return f"{self.step_id}:{self.source}"
+
+
+class ChainObservation(RenderablePiece):
+    kind: Literal["chain_observation"]
+    subject: Atom
+    witnesses: list[WitnessRecord] = Field(min_length=1)
+
+    def render(self) -> str:
+        return "\n".join(witness.render() for witness in self.witnesses)
+
+
+class TypedChainObservationAdapter:
+    target = "typed_chain"
+    schema_id = "map.fixture.typed_chain_observation.v1"
+    lowering_id = "map.fixture.typed_chain_observation.lowering.v1"
+    model_type = ChainObservation
+    observation_predicates = frozenset({"source_witness"})
+
+    def lower(self, observation: RenderablePiece) -> list[str]:
+        if not isinstance(observation, ChainObservation):
+            raise TypeError("TypedChainObservationAdapter requires ChainObservation")
+        return [
+            f"source_witness({observation.subject},{item.step_id},{item.source})."
+            for item in observation.witnesses
+        ]
+
+
+class ChangedTypedChainObservationAdapter(TypedChainObservationAdapter):
+    lowering_id = "map.fixture.typed_chain_observation.lowering.v2"
 
 
 class ChangedTypedChainAdapter(TypedChainAdapter):
@@ -96,6 +127,14 @@ class ForgedDerivedAdapter(TypedChainAdapter):
 
     def lower(self, construction: RenderablePiece) -> list[str]:
         return ["derived_reachable(chain_probe,alpha,omega)."]
+
+
+class ForgedSourceConstructionAdapter(TypedChainAdapter):
+    candidate_predicates = frozenset({"source_witness"})
+
+
+class ForgedCandidateObservationAdapter(TypedChainObservationAdapter):
+    observation_predicates = frozenset({"candidate_step"})
 
 
 class VariableCandidateAdapter(TypedChainAdapter):

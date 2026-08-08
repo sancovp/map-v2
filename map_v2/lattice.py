@@ -7,8 +7,11 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .construction import (
     ConstructionAdapter,
+    ObservationAdapter,
     adapter_context,
+    observation_adapter_context,
     validate_and_lower,
+    validate_and_lower_observation,
 )
 
 from .griess import (
@@ -67,6 +70,13 @@ PACKET_FIELDS = (
     "construction_lowering_id",
     "construction_lowering_sha256",
     "construction_facts_sha256",
+    "observation_schema_id",
+    "observation_schema_sha256",
+    "observation_payload_sha256",
+    "observation_render_sha256",
+    "observation_lowering_id",
+    "observation_lowering_sha256",
+    "observation_facts_sha256",
 )
 
 
@@ -102,6 +112,7 @@ class MapV2Lattice(MapV2StateMixin):
         *,
         compiler: TargetCompiler | None = None,
         construction_adapter: ConstructionAdapter | None = None,
+        observation_adapter: ObservationAdapter | None = None,
         guide_builder: GuideBuilder | None = None,
         certificate_builder: CertificateBuilder | None = None,
     ) -> None:
@@ -110,6 +121,7 @@ class MapV2Lattice(MapV2StateMixin):
         self.workspace_path = self.state_dir / "workspace.pl"
         self.compiler = compiler
         self.construction_adapter = construction_adapter
+        self.observation_adapter = observation_adapter
         self.guide_builder = guide_builder
         self.certificate_builder = certificate_builder
 
@@ -212,6 +224,10 @@ class MapV2Lattice(MapV2StateMixin):
         return packet
 
     def fill(self, name: str, raw_facts: list[str]) -> dict[str, Any]:
+        if self.construction_adapter is not None or self.observation_adapter is not None:
+            raise MapV2Error(
+                "raw fill is disabled when typed authority adapters are selected"
+            )
         state = self._load()
         node = self._node(state, name)
         if node["status"] != "open":
@@ -279,6 +295,43 @@ class MapV2Lattice(MapV2StateMixin):
             "next": self.next_name(state),
         }
 
+    def attach_observation(
+        self,
+        name: str,
+        payload: Mapping[str, Any],
+        adapter: ObservationAdapter | None = None,
+    ) -> dict[str, Any]:
+        """Attach independently validated source evidence to a filled node."""
+        state = self._load()
+        node = self._node(state, name)
+        if node["status"] != "filled" or node["griess"]["phase"] != "build":
+            raise MapV2Error(
+                f"attach_observation requires a filled BUILD node; {name!r} is "
+                f"{node['status']}/{node['griess']['phase']}"
+            )
+        if node.get("observation") is not None:
+            raise MapV2Error(f"node already has an observation snapshot: {name!r}")
+        selected_adapter = self._resolve_observation_adapter(adapter)
+        if selected_adapter.target != state["target"]:
+            raise MapV2Error(
+                "observation adapter target mismatch: "
+                f"expected {state['target']}, got {selected_adapter.target}"
+            )
+        lowered = validate_and_lower_observation(selected_adapter, payload)
+        node["facts"].extend(lowered.facts)
+        node["observation"] = lowered.metadata
+        node["certificate"] = None
+        node["proof_context"] = None
+        state["selected"] = name
+        self._save(state)
+        return {
+            "observed": name,
+            "fact_count": len(lowered.facts),
+            "observation": self._artifact_summary(lowered.metadata),
+            "griess_phase": "build",
+            "next": "compile",
+        }
+
     def retry(self, name: str) -> dict[str, Any]:
         state = self._load()
         node = self._node(state, name)
@@ -292,10 +345,15 @@ class MapV2Lattice(MapV2StateMixin):
             and certificate.get("domain_sha256") != domain_sha256
         )
         construction_stale = self._construction_rejection(node) is not None
+        observation_stale = self._observation_rejection(node) is not None
         if phase == "soup":
             advance_griess(node["griess"], "derive", "retry from MAP residue")
         elif phase == "ont" and (
-            workspace_stale or kappa_stale or domain_stale or construction_stale
+            workspace_stale
+            or kappa_stale
+            or domain_stale
+            or construction_stale
+            or observation_stale
         ):
             invalidate_to_derive(node["griess"], "proof context changed")
         else:
@@ -310,6 +368,10 @@ class MapV2Lattice(MapV2StateMixin):
         return {"retrying": name, "griess_phase": "derive", "next": "compute"}
 
     def revise(self, name: str, raw_facts: list[str]) -> dict[str, Any]:
+        if self.construction_adapter is not None or self.observation_adapter is not None:
+            raise MapV2Error(
+                "raw revise is disabled when typed authority adapters are selected"
+            )
         state = self._load()
         node = self._node(state, name)
         if node["status"] != "repairing":
@@ -324,10 +386,12 @@ class MapV2Lattice(MapV2StateMixin):
                 "revised_at": utc_now(),
                 "facts": list(node.get("facts", [])),
                 "construction": node.get("construction"),
+                "observation": node.get("observation"),
             }
         )
         node["facts"] = facts
         node["construction"] = None
+        node["observation"] = None
         node["status"] = "filled"
         node["certificate"] = None
         node["proof_context"] = None
@@ -372,10 +436,12 @@ class MapV2Lattice(MapV2StateMixin):
                 "revised_at": utc_now(),
                 "facts": list(node.get("facts", [])),
                 "construction": node.get("construction"),
+                "observation": node.get("observation"),
             }
         )
         node["facts"] = lowered.facts
         node["construction"] = lowered.metadata
+        node["observation"] = None
         node["status"] = "filled"
         node["certificate"] = None
         node["proof_context"] = None
@@ -424,6 +490,11 @@ class MapV2Lattice(MapV2StateMixin):
             raise MapV2Error(
                 f"compile rejected typed construction: {construction_rejection}"
             )
+        observation_rejection = self._observation_rejection(node)
+        if observation_rejection:
+            raise MapV2Error(
+                f"compile rejected typed observation: {observation_rejection}"
+            )
         if phase == "build":
             advance_griess(node["griess"], "verify", "MAP verification started")
             self._save(state)
@@ -449,6 +520,8 @@ class MapV2Lattice(MapV2StateMixin):
         }
         if node.get("construction") is not None:
             proof_context["construction"] = node["construction"]
+        if node.get("observation") is not None:
+            proof_context["observation"] = node["observation"]
         proof_context.update(packet.get("proof_context", {}))
         node["proof_context"] = proof_context
         node["certificate"] = self._certificate(
@@ -577,8 +650,22 @@ class MapV2Lattice(MapV2StateMixin):
             )
         return selected
 
+    def _resolve_observation_adapter(
+        self, adapter: ObservationAdapter | None
+    ) -> ObservationAdapter:
+        selected = adapter or self.observation_adapter
+        if selected is None:
+            raise MapV2Error(
+                "typed observation attachment requires a selected observation adapter"
+            )
+        return selected
+
     @staticmethod
     def _construction_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+        return MapV2Lattice._artifact_summary(metadata)
+
+    @staticmethod
+    def _artifact_summary(metadata: dict[str, Any]) -> dict[str, Any]:
         return {
             key: metadata[key]
             for key in (
@@ -609,4 +696,23 @@ class MapV2Lattice(MapV2StateMixin):
             return "stale_construction_lowering_id"
         if current["lowering_sha256"] != construction.get("lowering_sha256"):
             return "stale_construction_lowering"
+        return None
+
+    def _observation_rejection(self, node: dict[str, Any]) -> str | None:
+        observation = node.get("observation")
+        if observation is None:
+            return None
+        if self.observation_adapter is None:
+            return "missing_current_observation_adapter"
+        current = observation_adapter_context(self.observation_adapter)
+        if current["target"] != observation.get("target"):
+            return "stale_observation_target"
+        if current["schema_id"] != observation.get("schema_id"):
+            return "stale_observation_schema_id"
+        if current["schema_sha256"] != observation.get("schema_sha256"):
+            return "stale_observation_schema"
+        if current["lowering_id"] != observation.get("lowering_id"):
+            return "stale_observation_lowering_id"
+        if current["lowering_sha256"] != observation.get("lowering_sha256"):
+            return "stale_observation_lowering"
         return None

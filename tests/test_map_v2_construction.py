@@ -16,10 +16,14 @@ from map_v2 import (
     main,
 )
 from tests.fixtures.typed_chain_adapter import (
+    ChangedTypedChainObservationAdapter,
     ChangedTypedChainAdapter,
     ConjoinedCandidateAdapter,
+    ForgedCandidateObservationAdapter,
     ForgedDerivedAdapter,
+    ForgedSourceConstructionAdapter,
     TypedChainAdapter,
+    TypedChainObservationAdapter,
     VariableCandidateAdapter,
 )
 
@@ -59,16 +63,33 @@ def construction_payload(*, complete: bool = True) -> dict:
     }
 
 
+def observation_payload(construction: dict) -> dict:
+    return {
+        "kind": "chain_observation",
+        "subject": construction["subject"],
+        "witnesses": [
+            {
+                "kind": "witness",
+                "step_id": step["id"],
+                "source": step["how"]["source"],
+            }
+            for step in construction["steps"]
+        ],
+    }
+
+
 class TypedConstructionMapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory(prefix="map_psc_test_")
         self.state_dir = Path(self.tempdir.name) / "lattice"
         self.adapter = TypedChainAdapter()
+        self.observation_adapter = TypedChainObservationAdapter()
         self.compiler = PrologTargetCompiler(load_domain_manifest(CHAIN_MANIFEST))
         self.lattice = MapV2Lattice(
             self.state_dir,
             compiler=self.compiler,
             construction_adapter=self.adapter,
+            observation_adapter=self.observation_adapter,
         )
 
     def tearDown(self) -> None:
@@ -85,10 +106,16 @@ class TypedConstructionMapTests(unittest.TestCase):
 
     def test_psc_construction_reaches_ont_through_recursive_map_derivation(self) -> None:
         self.prepare()
-        filled = self.lattice.fill_construction(
-            "chain_probe", construction_payload()
+        payload = construction_payload()
+        filled = self.lattice.fill_construction("chain_probe", payload)
+        observed = self.lattice.attach_observation(
+            "chain_probe", observation_payload(payload)
         )
         self.assertEqual(filled["construction"]["schema_id"], "map.fixture.typed_chain.v1")
+        self.assertEqual(
+            observed["observation"]["schema_id"],
+            "map.fixture.typed_chain_observation.v1",
+        )
 
         workspace = self.lattice.workspace_path.read_text(encoding="utf-8")
         self.assertIn("candidate_step(chain_probe,first_step,alpha,beta).", workspace)
@@ -125,9 +152,9 @@ class TypedConstructionMapTests(unittest.TestCase):
 
     def test_valid_typed_value_can_remain_soup_when_relational_goal_is_open(self) -> None:
         self.prepare()
-        self.lattice.fill_construction(
-            "chain_probe", construction_payload(complete=False)
-        )
+        payload = construction_payload(complete=False)
+        self.lattice.fill_construction("chain_probe", payload)
+        self.lattice.attach_observation("chain_probe", observation_payload(payload))
 
         packet = self.lattice.compile("chain_probe")
 
@@ -165,6 +192,36 @@ class TypedConstructionMapTests(unittest.TestCase):
                 adapter=ForgedDerivedAdapter(),
             )
 
+    def test_construction_cannot_author_source_evidence(self) -> None:
+        self.prepare()
+        with self.assertRaisesRegex(
+            MapConstructionError, "not candidate-authorable"
+        ):
+            self.lattice.fill_construction(
+                "chain_probe",
+                construction_payload(),
+                adapter=ForgedSourceConstructionAdapter(),
+            )
+
+    def test_typed_lattice_cannot_bypass_adapters_with_raw_fill(self) -> None:
+        self.prepare()
+        with self.assertRaisesRegex(MapV2Error, "raw fill is disabled"):
+            self.lattice.fill(
+                "chain_probe",
+                ["source_witness(chain_probe,second_step,forged_report)."],
+            )
+
+    def test_observation_cannot_author_candidate_claims(self) -> None:
+        self.prepare()
+        payload = construction_payload()
+        self.lattice.fill_construction("chain_probe", payload)
+        with self.assertRaisesRegex(MapConstructionError, "not source-authorable"):
+            self.lattice.attach_observation(
+                "chain_probe",
+                observation_payload(payload),
+                adapter=ForgedCandidateObservationAdapter(),
+            )
+
     def test_lowerer_cannot_smuggle_a_universal_candidate_with_a_variable(self) -> None:
         self.prepare()
         with self.assertRaisesRegex(MapConstructionError, "not variables"):
@@ -192,6 +249,7 @@ class TypedConstructionMapTests(unittest.TestCase):
             self.state_dir,
             compiler=self.compiler,
             construction_adapter=self.adapter,
+            observation_adapter=self.observation_adapter,
         )
         construction = reopened.show("chain_probe")["construction"]
 
@@ -204,13 +262,16 @@ class TypedConstructionMapTests(unittest.TestCase):
 
     def test_adapter_change_stales_an_ont_certificate(self) -> None:
         self.prepare()
-        self.lattice.fill_construction("chain_probe", construction_payload())
+        payload = construction_payload()
+        self.lattice.fill_construction("chain_probe", payload)
+        self.lattice.attach_observation("chain_probe", observation_payload(payload))
         self.lattice.compile("chain_probe")
 
         changed = MapV2Lattice(
             self.state_dir,
             compiler=self.compiler,
             construction_adapter=ChangedTypedChainAdapter(),
+            observation_adapter=self.observation_adapter,
         )
 
         self.assertEqual(
@@ -227,17 +288,46 @@ class TypedConstructionMapTests(unittest.TestCase):
         ):
             changed.export_certificate("chain_probe")
 
+    def test_observation_adapter_change_stales_an_ont_certificate(self) -> None:
+        self.prepare()
+        payload = construction_payload()
+        self.lattice.fill_construction("chain_probe", payload)
+        self.lattice.attach_observation("chain_probe", observation_payload(payload))
+        self.lattice.compile("chain_probe")
+
+        changed = MapV2Lattice(
+            self.state_dir,
+            compiler=self.compiler,
+            construction_adapter=self.adapter,
+            observation_adapter=ChangedTypedChainObservationAdapter(),
+        )
+
+        self.assertEqual(
+            changed.queue(),
+            [
+                {
+                    "name": "chain_probe",
+                    "reason": "reopen_after_stale_observation_lowering_id",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(
+            MapV2Error, "stale_observation_lowering_id"
+        ):
+            changed.export_certificate("chain_probe")
+
     def test_typed_revision_preserves_prior_construction(self) -> None:
         self.prepare()
         original = construction_payload(complete=False)
         self.lattice.fill_construction("chain_probe", original)
+        self.lattice.attach_observation("chain_probe", observation_payload(original))
         self.lattice.compile("chain_probe")
         self.lattice.retry("chain_probe")
         self.lattice.compute("chain_probe")
 
-        revised = self.lattice.revise_construction(
-            "chain_probe", construction_payload()
-        )
+        complete = construction_payload()
+        revised = self.lattice.revise_construction("chain_probe", complete)
+        self.lattice.attach_observation("chain_probe", observation_payload(complete))
         packet = self.lattice.compile("chain_probe")
 
         node = self.lattice.show("chain_probe")
@@ -263,6 +353,15 @@ class TypedConstructionMapTests(unittest.TestCase):
             ],
             ["compile", "chain_probe"],
         ]
+        payload = construction_payload()
+        commands.insert(
+            4,
+            [
+                "attach-observation",
+                "chain_probe",
+                json.dumps(observation_payload(payload)),
+            ],
+        )
         last = None
         for command in commands:
             out = io.StringIO()
@@ -275,6 +374,8 @@ class TypedConstructionMapTests(unittest.TestCase):
                         str(CHAIN_MANIFEST),
                         "--construction-adapter",
                         adapter_ref,
+                        "--observation-adapter",
+                        "tests.fixtures.typed_chain_adapter:TypedChainObservationAdapter",
                         *command,
                     ]
                 )

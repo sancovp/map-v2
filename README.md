@@ -5,8 +5,9 @@ persistent Prolog-backed concept lattices. It uses the general closed-world
 proof pattern demonstrated by GAS, but it does not import or execute GAS.
 
 ```text
-application -> optional PSC construction -> domain manifest + Prolog theory
-            -> MAP v2 -> SWI-Prolog
+candidate author -> optional PSC construction --\
+                                              +-> domain + MAP v2 -> SWI-Prolog
+trusted observer -> optional PSC observation --/
 ```
 
 MAP owns lattice state, kappa declarations, the Griess phase graph, authored
@@ -23,17 +24,20 @@ adapter:
 ```text
 LLM JSON
   -> domain-owned RenderablePiece model (local shape and required HOW fields)
-  -> domain-owned lowering (candidate_* and source_* facts only)
+  -> domain-owned construction lowering (candidate_* facts only)
+trusted observation JSON
+  -> pinned observation model and lowering (source_* facts only)
   -> MAP domain theory (recursive and relational consequences)
   -> SOUP residue or ONT certificate
 ```
 
 PSC and MAP prove different things. PSC validates one explicit value: field
 types, nested structure, discriminators, and local invariants. It does not
-prove graph reachability or domain closure. MAP accepts only candidate/source
-facts from the adapter, derives semantic predicates in Prolog, and certifies
-the exact construction schema, payload, rendering, lowering, facts, domain,
-and proof residue used for the result.
+prove graph reachability or domain closure. MAP keeps candidate and source
+authority separate: a `ConstructionAdapter` can emit only `candidate_*`, while
+a pinned `ObservationAdapter` can emit only `source_*`. MAP derives semantic
+predicates in Prolog and certifies both exact schemas, payloads, renderings,
+lowerings, fact sets, the domain, and the proof residue used for the result.
 
 An adapter supplies a `RenderablePiece` subclass, stable schema and lowering
 identifiers, an allow-list of candidate predicates, and a deterministic
@@ -42,6 +46,13 @@ identifiers, an allow-list of candidate predicates, and a deterministic
 `tests/fixtures/map_domains/typed_chain/`. It demonstrates logic that is
 awkward to express as a single Pydantic object: transitive reachability over an
 arbitrary chain of witnessed edges.
+
+The first pattern-coherence witness lives in
+`tests/fixtures/pattern_coherence_adapter.py` and
+`tests/fixtures/map_domains/pattern_coherence/`. It proves a statically
+versioned `categorical_ring` occurrence from independently observed ring
+capabilities. Complete observations can reach ONT or produce an exact
+contradiction; partial coverage and ambiguous bindings remain SOUP.
 
 Typed constructions deliberately do not use a generic `MetaStack` as their
 transport envelope. Each application defines its concrete nested PSC model so
@@ -97,9 +108,21 @@ map-v2 \
   fill-construction NODE @construction.json
 ```
 
-The same adapter must remain selected when compiling or exporting the typed
-node. A schema or lowering change reopens an existing certificate instead of
-silently treating an old proof as current.
+Applications with observed evidence select a separate trusted adapter and
+attach the snapshot before compilation:
+
+```bash
+map-v2 \
+  --domain-manifest PATH \
+  --state STATE \
+  --construction-adapter your_package.adapters:YourConstructionAdapter \
+  --observation-adapter your_package.observers:YourObservationAdapter \
+  attach-observation NODE @observation.json
+```
+
+Both adapters must remain selected when compiling or exporting the typed node.
+A schema or lowering change on either side reopens an existing certificate
+instead of silently treating an old proof as current.
 
 See [the architecture guide](map_v2/docs/architecture.md) for the Griess phase
 graph and SOUP/ONT semantics.

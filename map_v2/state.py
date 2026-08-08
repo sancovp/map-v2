@@ -11,7 +11,7 @@ from .certificates import build_certificate_envelope
 from .griess import kappa_sha256, migrate_legacy_griess, new_griess_state
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 
 
 class MapV2Error(ValueError):
@@ -73,6 +73,7 @@ class MapV2StateMixin:
             self._workspace_sha256(state),
             self._current_domain_sha256(state),
             self._construction_rejection(node),
+            self._observation_rejection(node),
         )
         if reason:
             raise MapV2Error(f"certificate_export_rejected:{reason}")
@@ -102,6 +103,7 @@ class MapV2StateMixin:
                 workspace_sha256,
                 domain_sha256,
                 self._construction_rejection(node),
+                self._observation_rejection(node),
             )
             if reason:
                 rejected.append({"node": source, "reason": reason})
@@ -118,6 +120,7 @@ class MapV2StateMixin:
         workspace_sha256: str,
         domain_sha256: str | None,
         construction_rejection: str | None = None,
+        observation_rejection: str | None = None,
     ) -> str | None:
         if not certificate:
             return "missing_compile_certificate"
@@ -134,6 +137,8 @@ class MapV2StateMixin:
             return "stale_domain_certificate"
         if construction_rejection:
             return construction_rejection
+        if observation_rejection:
+            return observation_rejection
         if node["griess"]["phase"] != "ont":
             return "source_not_ont"
         return None
@@ -175,6 +180,7 @@ class MapV2StateMixin:
                 workspace_sha256,
                 domain_sha256,
                 self._construction_rejection(node),
+                self._observation_rejection(node),
             )
             if reason:
                 result.append({"name": name, "reason": reason})
@@ -186,6 +192,7 @@ class MapV2StateMixin:
         workspace_sha256: str,
         domain_sha256: str | None,
         construction_rejection: str | None = None,
+        observation_rejection: str | None = None,
     ) -> str | None:
         phase = node["griess"]["phase"]
         if node["status"] == "expanded" and phase == "derive":
@@ -218,6 +225,8 @@ class MapV2StateMixin:
             return "reopen_after_domain_change"
         if construction_rejection:
             return f"reopen_after_{construction_rejection}"
+        if observation_rejection:
+            return f"reopen_after_{observation_rejection}"
         if certificate.get("status") != "compiled":
             return "repair_from_compiler_residue"
         return None
@@ -246,6 +255,18 @@ class MapV2StateMixin:
                 ("facts_sha256", "construction_facts_sha256"),
             ):
                 scope[target] = construction[source]
+        observation = node.get("observation")
+        if observation is not None:
+            for source, target in (
+                ("schema_id", "observation_schema_id"),
+                ("schema_sha256", "observation_schema_sha256"),
+                ("payload_sha256", "observation_payload_sha256"),
+                ("render_sha256", "observation_render_sha256"),
+                ("lowering_id", "observation_lowering_id"),
+                ("lowering_sha256", "observation_lowering_sha256"),
+                ("facts_sha256", "observation_facts_sha256"),
+            ):
+                scope[target] = observation[source]
         return scope
 
     def _certificate(
@@ -295,6 +316,7 @@ class MapV2StateMixin:
             "sources": [],
             "facts": [],
             "construction": None,
+            "observation": None,
             "status": "open",
             "certificate": None,
             "proof_context": None,
@@ -346,10 +368,16 @@ class MapV2StateMixin:
             state["version"] = 2
         if state.get("version") == 2:
             state["subject"] = state.pop("story")
+            state["version"] = 3
+            self._save(state)
+        if state.get("version") == 3:
+            for node in state.get("nodes", {}).values():
+                node.setdefault("observation", None)
             state["version"] = STATE_VERSION
             self._save(state)
         for node in state.get("nodes", {}).values():
             node.setdefault("construction", None)
+            node.setdefault("observation", None)
         if state.get("version") != STATE_VERSION:
             raise MapV2Error(f"unsupported MAP v2 state version: {state.get('version')}")
         return state
