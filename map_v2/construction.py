@@ -74,6 +74,24 @@ def _canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _jsonable_errors(errors: list) -> list:
+    """Pydantic error dicts may carry raw exception objects in ctx (e.g. the
+    ValueError a field_validator raised); coerce non-JSON leaves to str so the
+    rejection message survives serialization instead of masking the residue
+    with its own TypeError."""
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: scrub(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [scrub(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    return [scrub(e) for e in errors]
+
+
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -284,7 +302,7 @@ def validate_and_lower(
     try:
         construction = adapter.model_type.model_validate(dict(payload))
     except ValidationError as exc:
-        errors = exc.errors(include_url=False)
+        errors = _jsonable_errors(exc.errors(include_url=False))
         raise MapConstructionError(
             "typed_construction_validation_failed:"
             + _canonical_json({"schema_id": context["schema_id"], "errors": errors})
@@ -329,7 +347,7 @@ def validate_and_lower_observation(
     try:
         observation = adapter.model_type.model_validate(dict(payload))
     except ValidationError as exc:
-        errors = exc.errors(include_url=False)
+        errors = _jsonable_errors(exc.errors(include_url=False))
         raise MapConstructionError(
             "typed_observation_validation_failed:"
             + _canonical_json({"schema_id": context["schema_id"], "errors": errors})
